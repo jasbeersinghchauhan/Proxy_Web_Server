@@ -1,16 +1,30 @@
-# 🧩 Multi-Threaded Web Proxy Server (C++20 / Windows)
+# 🧩 High Performance HTTP/HTTPS Proxy Server
 
-A **high-performance, multi-threaded web proxy server** written in **Modern C++(C++20)** for the **Windows** platform.  
+A high-performance **forward proxy server** implemented in Modern **C++20**.  
 This project focuses on systems programming, network socket management, and concurrency patterns. It implements a custom LRU cache, robust thread-safe logging, and supports both **HTTP (GET)** requests and **HTTPS (CONNECT)** tunneling.
-**Tech:** C++20 • Winsock2 • Multithreading • HTTP Proxy • LRU Cache • RAII
+**Tech:** C++20 • CMake • Socket Programming • HTTP/1.1 • HTTPS CONNECT • Multithreading • LRU Cache • RAII • GoogleTest
 
-## ⭐ What This Project Demonstrates
+## ⭐ Highlights
+- HTTP/1.1 GET proxy implementation
+- HTTPS CONNECT tunneling
+- Thread-safe custom LRU cache
+- Thread-per-connection architecture
+- Connection limiting with std::counting_semaphore
+- RAII-based socket lifetime management
+- Graceful shutdown via signal handling
+- Thread-safe structured logging
+- GoogleTest unit test suite
+- Modular socket abstraction layer
 
-- Low-level TCP socket programming using Winsock2
-- Concurrent client handling (std::thread)
-- HTTPS tunneling via CONNECT
-- HTTP response caching with custom LRU
-- Thread-safe logging infrastructure
+## 🚀 What This Project Demonstrates
+
+- TCP/IP socket programming
+- HTTP protocol implementation
+- Concurrent server architecture
+- Thread synchronization
+- RAII resource management
+- Custom cache design
+- Systems programming in Modern C++20
 
 ### ⚠️ Note on Ownership
 
@@ -21,7 +35,7 @@ This project focuses on systems programming, network socket management, and conc
 
 ### 🧵 C++20 Multi-Threaded Architecture
 
-- Uses the **Thread-per-client** model implemented via the std::thread.
+- Uses the **Thread-per-connection** model implemented via the std::thread.
 - Decouples connection logic from the main acceptor loop, ensuring high responsiveness.
 
 ### 🔒 Semaphore-Based Connection Limiting
@@ -47,11 +61,13 @@ This project focuses on systems programming, network socket management, and conc
 
 ### 🧾 Modern Thread-Safe Logging
 
-- Centralized ProxyLogger singleton.
-- Uses C++20 `std::format` for type-safe, high-performance string formatting.
-- Ensures atomic writes to `proxy.log` using mutex locking, preventing interleaved output from different threads.
+The project includes a centralized singleton logger featuring:
+- Timestamped log entries
+- C++20 `std::format`
+- Thread-safe writes
+- Automatic flushing
+- Structured log output suitable for analysis dashboards
 
----
 
 ## 🖥️ Sample Execution
 
@@ -107,88 +123,181 @@ LRU caching behavior, and failure handling under real browser traffic.
 
 ## ⚙️ Architecture Overview
 
-### 1️⃣ Server Initialization (`proxy_main.cpp`)
-- Initializes **Winsock** (`WSAStartup`).
-- Sets up the `std::counting_semaphore` for connection throttling.
-- Binds the listening socket and enters the main accept loop.
+### Overall Architecture
+```text
+                    Browser / HTTP Client
+                             │
+                             ▼
+                  Listening TCP Socket
+                             │
+                             ▼
+             Connection Counting Semaphore
+                             │
+                             ▼
+                  Worker Thread (per Client)
+                             │
+               ┌─────────────┴─────────────┐
+               │                           │
+               ▼                           ▼
+        HTTP/1.1 GET                 HTTPS CONNECT
+               │                           │
+               ▼                           ▼
+      Thread-Safe LRU Cache          TCP Tunnel Relay
+               │                           │
+               ▼                           ▼
+          Origin Server               Remote Server
+```
 
-### 2️⃣ Client Accept Loop (`proxy_main.cpp`)
-- Waits for a semaphore slot (`sem.acquire()`).
-- Blocks on accept() to handle the incoming connection.
-- Spawns a detached `std::thread` to handle the specific client.
+### 1️⃣ Server Initialization (proxy_main.cpp)
+The application performs the following initialization steps:
 
-### 3️⃣ Client Handling (`proxy_handler.cpp`)
-The handler reads the client request and determines the mode:
+- Initializes the platform socket subsystem.
+- Creates the global in-memory LRU cache.
+- Initializes a std::counting_semaphore to limit concurrent client connections.
+- Creates, binds, and listens on the server socket.
+- Registers signal handlers for graceful shutdown.
+- Enters the client accept loop.
 
-#### 🔹 HTTPS CONNECT
-- Connects to the target server (default port 443).
-- Returns `200 Connection Established`.
-- Enters a `select()` loop to pipe raw bytes between client and server until timeout or closure.
+### 2️⃣ Client Accept Loop (proxy_main.cpp)
+The main server thread continuously waits for incoming client connections.
 
-#### 🔹 HTTP GET
-- Checks the LRU Cache for the requested URL.
-- **Cache Hit:** Serves data immediately from memory.
-- **Cache Miss:** Connects to the origin server, downloads the content, serves it to the client, and inserts it into the cache.
+For each accepted connection, the server:
+- Acquires a semaphore slot.
+- Accepts the client socket.
+- Creates a detached worker thread.
+- Passes ownership of the client socket to the worker thread.
 
-### 4️⃣ Resource Management
-- **RAII Principles:** Uses smart pointers (`std::unique_ptr`, `std::shared_ptr`) for memory management.
-- **Socket Safety:** Implements SocketGuard wrappers to ensure sockets are closed (closesocket) even if exceptions occur.
+This architecture keeps the accept loop responsive while allowing multiple clients to be served concurrently.
 
----
+### 3️⃣ Request Processing (proxy_handler.cpp)
+Each worker thread processes exactly one client connection.
+
+**🌐 HTTP GET Processing**
+For HTTP requests the proxy:
+
+- Reads the complete HTTP request header.
+- Parses the absolute-form request URI.
+- Extracts the destination host, port, and resource path.
+- Checks the thread-safe LRU cache for a cached response.
+- Immediately serves cached responses on a cache hit.
+- On a cache miss:
+  - Connects to the origin server.
+  - Rebuilds the request into origin-form.
+  - Removes duplicate `Host` and `Connection` headers.
+  - Streams the response back to the client.
+  - Stores cacheable responses in the LRU cache for future requests.
+
+**🔐 HTTPS CONNECT Processing**
+For HTTPS traffic the proxy:
+
+- Parses the destination host and port.
+- Establishes a TCP connection to the remote server.
+- Returns `HTTP/1.1 200 Connection Established`.
+- Uses `select()` to relay encrypted traffic between client and server.
+- Closes the tunnel when either endpoint disconnects or a timeout occurs.
+
+Since encrypted TLS packets are forwarded transparently, HTTPS communication remains end-to-end encrypted.
+
+### 4️⃣ Thread-Safe LRU Cache (proxy_cache.cpp)
+The cache combines:
+- `std::unordered_map` for O(1) lookup.
+- A custom doubly linked list for recency tracking.
+- `std::shared_ptr` and `std::weak_ptr` for safe ownership.
+- `std::mutex` for concurrent synchronization.
+
+Supported operations include: 
+| Operation | Complexity |
+|-----------|-----------|
+| Lookup | O(1) |
+| Insert | O(1) |
+| Update | O(1) |
+| Promotion | O(1) |
+| Eviction | O(1) |
+
+The least recently used objects are automatically evicted whenever the cache exceeds its configured capacity.
+
+### 5️⃣ Resource Management
+The project follows RAII principles throughout the implementation.
+
+Key resource management features include:
+
+- Automatic socket cleanup using RAII wrapper classes.
+- Automatic semaphore release using scope guards.
+- Smart pointers for dynamic memory management.
+- Graceful shutdown using signal handling.
+- Exception-safe cleanup of networking resources.
+
+### 🧪 Testing
+
+The cache subsystem is validated using GoogleTest.
+
+Current test coverage includes:
+- Basic cache insertion and lookup
+- Cache overwrite
+- Cache miss handling
+- LRU eviction
+- Multiple-item eviction
+- Capacity overflow handling
+- Empty URL rejection
+- Empty payload rejection
+- Oversized object rejection
+- Cache promotion after access
+- Thread safety under concurrent access
 
 ## 📁 Project Structure
 
 ```
 .
 ├── CMakeLists.txt         # CMake build configuration
-├── proxy_main.cpp         # Entry point, socket setup, semaphore, thread spawning
+├── proxy_main.cpp         # Server initialization and connection handling
+├── proxy_utils.hpp        # Platform abstraction and RAII utilities
 ├── proxy_handler.cpp      # Logic for HTTP parsing, CONNECT tunneling, and relaying
 ├── proxy_handler.hpp      
-├── proxy_cache.cpp        # Custom LRU Cache implementation (Map + Linked List)
+├── proxy_cache.cpp        # Thread-safe custom LRU cache
 ├── proxy_cache.hpp
-├── proxy_logger.cpp       # Singleton logger using C++20 std::format
+├── proxy_logger.cpp       # Thread-safe singleton logger
 ├── proxy_logger.hpp
-├── log_analyzer.html      # Standalone HTML/JS dashboard for log visualization
-├── proxy_cache_test.cpp         # Google Test unit tests for the cache
+├── log_analyzer.html      # Log visualization dashboard
+├── proxy_cache_test.cpp   # GoogleTest unit tests
 └── README.md
 ```
 
----
-
 ## 🧰 Dependencies
 
-- **Platform:** Windows 10/11 (Uses `winsock2.h`)
-- **Language:** C++20
-- **Libraries:** `Ws2_32.lib` (Windows Socket Library)
+### Requirements
 
----
+- C++20 compatible compiler
+- CMake 3.26 or newer
+- GoogleTest (optional, for unit testing)
+
 
 ## 🛠️ Building Instructions
 
-### ✅ Prerequisites
-- **CMake** (Version 3.10 or newer)
-- A C++20 compatible compiler (e.g. **Visual Studio 2019+**, **MinGW-w64**)
-- **Windows SDK** (Required for Winsock2)
+### Clone the Repository
+```bash
+git clone https://github.com/jasbeersinghchauhan/proxyWebServer.git
+cd proxy_web_server
+```
 
----
+### Configure the Build
+```bash
+mkdir build
+cd build
 
-### 🚀 Building with CMake
+cmake ..
+```
 
-1. **Open a terminal** in the project root directory.
-2. **Create a build directory:**
-    ```bash
-    mkdir build
-    cd build
-    cmake ..
-    cmake --build . --config Release
-    ```
+### Compile
+```bash
+cmake --build . --config Release
+```
 
 ## ▶️ Running the Proxy
 
 ### 1️⃣ Start the Proxy
 
 ```bash
-./proxy.exe 8080
+./proxy_main 8080
 ```
 
 ### 2️⃣ Configure Your Browser
@@ -227,25 +336,21 @@ That script loads the Chart.js library used for the pie chart visualization.
 
 ### ⚠️ Limitations
 
-- 🪟 Windows-only (depends on WinSock and WinAPI)
-
-- ❌ No Connection: keep-alive
+- ❌ HTTP Keep-Alive is not supported.
 
 - 💾 GET-only caching (no POST/PUT/DELETE)
 
-- 🔍 Basic HTTP parsing — may fail on complex headers
+- 🔍 Implements a subset of the HTTP/1.1 specification and may not handle all edge cases.
 
 - 🧠 In-memory cache — cleared on restart
 
 ## 🧭 Future Work / Roadmap
 
-- 🧩 Cross-platform support (POSIX sockets + pthreads)
-
-- 🔁 Thread pool (replace thread-per-client model)
+- 🔁 Thread pool (replace Thread-per-connection model)
 
 - 🔄 Keep-alive connections
 
-- 📨 POST request tunneling
+- 📨 Support additional HTTP methods (POST, PUT, DELETE)
 
 - 💽 Persistent on-disk cache
 
